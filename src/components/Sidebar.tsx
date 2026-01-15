@@ -10,6 +10,7 @@ import { formatRelativeTime } from "../utils/time";
 type SidebarProps = {
   workspaces: WorkspaceInfo[];
   threadsByWorkspace: Record<string, ThreadSummary[]>;
+  archivedThreadsByWorkspace: Record<string, ThreadSummary[]>;
   threadStatusById: Record<
     string,
     { isProcessing: boolean; hasUnread: boolean; isReviewing: boolean }
@@ -18,6 +19,8 @@ type SidebarProps = {
   activeWorkspaceId: string | null;
   activeThreadId: string | null;
   accountRateLimits: RateLimitSnapshot | null;
+  showArchivedSessions: boolean;
+  onToggleShowArchived: () => void;
   onOpenSettings: () => void;
   onOpenDebug: () => void;
   hasDebugAlerts: boolean;
@@ -27,9 +30,11 @@ type SidebarProps = {
   onConnectWorkspace: (workspace: WorkspaceInfo) => void;
   onAddAgent: (workspace: WorkspaceInfo) => void;
   onAddWorktreeAgent: (workspace: WorkspaceInfo) => void;
+  onImportSessions: (workspace: WorkspaceInfo) => void;
   onToggleWorkspaceCollapse: (workspaceId: string, collapsed: boolean) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onDeleteThread: (workspaceId: string, threadId: string) => void;
+  onUnarchiveThread: (workspaceId: string, threadId: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
   onDeleteWorktree: (workspaceId: string) => void;
 };
@@ -37,11 +42,14 @@ type SidebarProps = {
 export function Sidebar({
   workspaces,
   threadsByWorkspace,
+  archivedThreadsByWorkspace,
   threadStatusById,
   threadListLoadingByWorkspace,
   activeWorkspaceId,
   activeThreadId,
   accountRateLimits,
+  showArchivedSessions,
+  onToggleShowArchived,
   onOpenSettings,
   onOpenDebug,
   hasDebugAlerts,
@@ -51,9 +59,11 @@ export function Sidebar({
   onConnectWorkspace,
   onAddAgent,
   onAddWorktreeAgent,
+  onImportSessions,
   onToggleWorkspaceCollapse,
   onSelectThread,
   onDeleteThread,
+  onUnarchiveThread,
   onDeleteWorkspace,
   onDeleteWorktree,
 }: SidebarProps) {
@@ -160,6 +170,29 @@ export function Sidebar({
       action: () => onDeleteWorktree(workspaceId),
     });
     const menu = await Menu.new({ items: [deleteItem] });
+    const window = getCurrentWindow();
+    const position = new LogicalPosition(event.clientX, event.clientY);
+    await menu.popup(position, window);
+  }
+
+  async function showArchivedThreadMenu(
+    event: React.MouseEvent,
+    workspaceId: string,
+    threadId: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const unarchiveItem = await MenuItem.new({
+      text: "Unarchive",
+      action: () => onUnarchiveThread(workspaceId, threadId),
+    });
+    const copyItem = await MenuItem.new({
+      text: "Copy ID",
+      action: async () => {
+        await navigator.clipboard.writeText(threadId);
+      },
+    });
+    const menu = await Menu.new({ items: [copyItem, unarchiveItem] });
     const window = getCurrentWindow();
     const position = new LogicalPosition(event.clientX, event.clientY);
     await menu.popup(position, window);
@@ -402,6 +435,16 @@ export function Sidebar({
                       >
                         New worktree agent
                       </button>
+                      <button
+                        className="workspace-add-option"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setAddMenuAnchor(null);
+                          onImportSessions(entry);
+                        }}
+                      >
+                        Import sessions...
+                      </button>
                     </div>,
                     document.body,
                   )}
@@ -495,7 +538,7 @@ export function Sidebar({
                                       thread.id === activeThreadId
                                         ? "active"
                                         : ""
-                                    }`}
+                                    }${thread.status === "missing" ? " thread-row-missing" : ""}`}
                                     onClick={() =>
                                       onSelectThread(worktree.id, thread.id)
                                     }
@@ -516,15 +559,18 @@ export function Sidebar({
                                   >
                                     <span
                                       className={`thread-status ${
-                                        threadStatusById[thread.id]?.isReviewing
-                                          ? "reviewing"
-                                          : threadStatusById[thread.id]?.isProcessing
-                                            ? "processing"
-                                            : threadStatusById[thread.id]?.hasUnread
-                                              ? "unread"
-                                              : "ready"
+                                        thread.status === "missing"
+                                          ? "missing"
+                                          : threadStatusById[thread.id]?.isReviewing
+                                            ? "reviewing"
+                                            : threadStatusById[thread.id]?.isProcessing
+                                              ? "processing"
+                                              : threadStatusById[thread.id]?.hasUnread
+                                                ? "unread"
+                                                : "ready"
                                       }`}
                                       aria-hidden
+                                      title={thread.status === "missing" ? "Transcript not found" : undefined}
                                     />
                                     <span className="thread-name">{thread.name}</span>
                                     <div className="thread-menu">
@@ -599,7 +645,7 @@ export function Sidebar({
                           thread.id === activeThreadId
                             ? "active"
                             : ""
-                        }`}
+                        }${thread.status === "missing" ? " thread-row-missing" : ""}`}
                         onClick={() => onSelectThread(entry.id, thread.id)}
                         onContextMenu={(event) =>
                           showThreadMenu(event, entry.id, thread.id)
@@ -615,15 +661,18 @@ export function Sidebar({
                       >
                         <span
                           className={`thread-status ${
-                            threadStatusById[thread.id]?.isReviewing
-                              ? "reviewing"
-                              : threadStatusById[thread.id]?.isProcessing
-                                ? "processing"
-                                : threadStatusById[thread.id]?.hasUnread
-                                  ? "unread"
-                                  : "ready"
+                            thread.status === "missing"
+                              ? "missing"
+                              : threadStatusById[thread.id]?.isReviewing
+                                ? "reviewing"
+                                : threadStatusById[thread.id]?.isProcessing
+                                  ? "processing"
+                                  : threadStatusById[thread.id]?.hasUnread
+                                    ? "unread"
+                                    : "ready"
                           }`}
                           aria-hidden
+                          title={thread.status === "missing" ? "Transcript not found" : undefined}
                         />
                         <span className="thread-name">{thread.name}</span>
                         <div className="thread-menu">
@@ -661,8 +710,62 @@ export function Sidebar({
                           : `${threads.length - 3} more...`}
                       </button>
                     )}
+                    <button
+                      className="thread-show-archived"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onToggleShowArchived();
+                      }}
+                    >
+                      {showArchivedSessions ? "Hide archived" : "Show archived"}
+                    </button>
                   </div>
                 )}
+                {showArchivedSessions &&
+                  (archivedThreadsByWorkspace[entry.id]?.length ?? 0) > 0 && (
+                    <div className="thread-list thread-list-archived">
+                      {archivedThreadsByWorkspace[entry.id].map((thread) => (
+                        <div
+                          key={thread.id}
+                          className="thread-row thread-row-archived"
+                          onClick={() => onSelectThread(entry.id, thread.id)}
+                          onContextMenu={(event) =>
+                            showArchivedThreadMenu(event, entry.id, thread.id)
+                          }
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              onSelectThread(entry.id, thread.id);
+                            }
+                          }}
+                        >
+                          <span
+                            className="thread-status archived"
+                            aria-hidden
+                          />
+                          <span className="thread-name">{thread.name}</span>
+                          <div className="thread-menu">
+                            <button
+                              className="thread-menu-trigger"
+                              aria-label="Thread menu"
+                              onMouseDown={(event) => event.stopPropagation()}
+                              onClick={(event) =>
+                                showArchivedThreadMenu(
+                                  event,
+                                  entry.id,
+                                  thread.id,
+                                )
+                              }
+                            >
+                              ...
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 {showThreadLoader && (
                   <div className="thread-loading" aria-label="Loading agents">
                     <span className="thread-skeleton thread-skeleton-wide" />

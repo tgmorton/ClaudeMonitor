@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { Users } from "lucide-react";
 import type { AccessMode, ThreadTokenUsage } from "../types";
 
 type ComposerMetaBarProps = {
@@ -12,6 +13,9 @@ type ComposerMetaBarProps = {
   accessMode: AccessMode;
   onSelectAccessMode: (mode: AccessMode) => void;
   contextUsage?: ThreadTokenUsage | null;
+  subAgents?: { id: string; name: string }[];
+  selectedSubAgentId?: string | null;
+  onSelectSubAgent?: (id: string) => void;
 };
 
 export function ComposerMetaBar({
@@ -25,6 +29,9 @@ export function ComposerMetaBar({
   accessMode,
   onSelectAccessMode,
   contextUsage = null,
+  subAgents,
+  selectedSubAgentId,
+  onSelectSubAgent,
 }: ComposerMetaBarProps) {
   const contextWindow = contextUsage?.modelContextWindow ?? null;
   const lastTokens = contextUsage?.last.totalTokens ?? 0;
@@ -161,6 +168,27 @@ export function ComposerMetaBar({
             <option value="full-access">Full access</option>
           </select>
         </div>
+        {subAgents && subAgents.length > 0 && (
+          <div className="composer-select-wrap">
+            <span className="composer-icon" aria-hidden>
+              <Users size={14} />
+            </span>
+            <select
+              className="composer-select composer-select--agent"
+              aria-label="Sub-agent"
+              value={selectedSubAgentId ?? ""}
+              onChange={(e) => onSelectSubAgent?.(e.target.value)}
+              disabled={disabled}
+            >
+              <option value="">Default</option>
+              {subAgents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
       <div className="composer-context">
         <div

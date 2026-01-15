@@ -1,9 +1,11 @@
 use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, Submenu};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+mod claude;
 mod codex;
 mod git;
 mod prompts;
+mod registry;
 mod settings;
 mod state;
 mod storage;
@@ -164,7 +166,29 @@ pub fn run() {
             codex::model_list,
             codex::account_rate_limits,
             codex::skills_list,
-            prompts::prompts_list
+            prompts::prompts_list,
+            registry::get_visible_sessions,
+            registry::scan_available_sessions,
+            registry::import_sessions,
+            registry::registry_archive_session,
+            registry::register_session,
+            registry::update_session_activity,
+            registry::get_session_history,
+            registry::get_archived_sessions,
+            registry::registry_unarchive_session,
+            // Claude Agent SDK commands
+            claude::claude_doctor,
+            claude::claude_start_session,
+            claude::claude_resume_session,
+            claude::claude_send_message,
+            claude::claude_interrupt,
+            claude::claude_respond_permission,
+            claude::claude_list_models,
+            claude::claude_list_commands,
+            claude::claude_mcp_status,
+            claude::claude_rewind_files,
+            claude::claude_set_mcp_servers,
+            claude::claude_close_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

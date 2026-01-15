@@ -90,7 +90,11 @@ export function useQueuedSend({
         return;
       }
       if (activeWorkspace && !activeWorkspace.connected) {
-        await connectWorkspace(activeWorkspace);
+        try {
+          await connectWorkspace(activeWorkspace);
+        } catch {
+          // Claude-native: allow sending even if Codex app-server connect fails.
+        }
       }
       if (trimmed.startsWith("/review")) {
         await startReview(trimmed);

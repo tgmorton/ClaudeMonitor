@@ -102,9 +102,51 @@ export function useComposerAutocompleteState({
     [],
   );
 
+  const claudeCommands = useMemo<AutocompleteItem[]>(
+    () => [
+      {
+        id: "init",
+        label: "init",
+        description: "Initialize Claude in this project",
+        insertText: "init",
+      },
+      {
+        id: "doctor",
+        label: "doctor",
+        description: "Check Claude Code installation",
+        insertText: "doctor",
+      },
+      {
+        id: "config",
+        label: "config",
+        description: "View or edit Claude configuration",
+        insertText: "config",
+      },
+      {
+        id: "clear",
+        label: "clear",
+        description: "Clear conversation history",
+        insertText: "clear",
+      },
+      {
+        id: "compact",
+        label: "compact",
+        description: "Compact conversation context",
+        insertText: "compact",
+      },
+      {
+        id: "help",
+        label: "help",
+        description: "Show available commands",
+        insertText: "help",
+      },
+    ],
+    [],
+  );
+
   const slashItems = useMemo<AutocompleteItem[]>(
-    () => [...reviewItems, ...promptItems],
-    [promptItems, reviewItems],
+    () => [...reviewItems, ...claudeCommands, ...promptItems],
+    [claudeCommands, promptItems, reviewItems],
   );
 
   const triggers = useMemo(

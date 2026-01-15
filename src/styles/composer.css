@@ -453,6 +453,11 @@
   max-width: 90px;
 }
 
+.composer-select--agent {
+  width: 90px;
+  max-width: 90px;
+}
+
 .composer-select:focus {
   outline: none;
   color: var(--text-strong);

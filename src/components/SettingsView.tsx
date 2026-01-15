@@ -9,8 +9,9 @@ import {
   TerminalSquare,
   Trash2,
   X,
+  Zap,
 } from "lucide-react";
-import type { AppSettings, CodexDoctorResult, WorkspaceInfo } from "../types";
+import type { AppSettings, ClaudeDoctorResult, CodexDoctorResult, WorkspaceInfo } from "../types";
 import {
   clampUiScale,
 } from "../utils/uiScale";
@@ -25,13 +26,14 @@ type SettingsViewProps = {
   appSettings: AppSettings;
   onUpdateAppSettings: (next: AppSettings) => Promise<void>;
   onRunDoctor: (codexBin: string | null) => Promise<CodexDoctorResult>;
+  onRunClaudeDoctor?: (claudeCodeBin: string | null) => Promise<ClaudeDoctorResult>;
   onUpdateWorkspaceCodexBin: (id: string, codexBin: string | null) => Promise<void>;
   scaleShortcutTitle: string;
   scaleShortcutText: string;
 };
 
 type SettingsSection = "projects" | "display";
-type CodexSection = SettingsSection | "codex";
+type CodexSection = SettingsSection | "codex" | "claude-code" | "mcp-servers";
 
 function orderValue(workspace: WorkspaceInfo) {
   const value = workspace.settings.sortOrder;
@@ -48,12 +50,14 @@ export function SettingsView({
   appSettings,
   onUpdateAppSettings,
   onRunDoctor,
+  onRunClaudeDoctor,
   onUpdateWorkspaceCodexBin,
   scaleShortcutTitle,
   scaleShortcutText,
 }: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<CodexSection>("projects");
   const [codexPathDraft, setCodexPathDraft] = useState(appSettings.codexBin ?? "");
+  const [claudeCodePathDraft, setClaudeCodePathDraft] = useState(appSettings.claudeCodeBin ?? "");
   const [scaleDraft, setScaleDraft] = useState(
     `${Math.round(clampUiScale(appSettings.uiScale) * 100)}%`,
   );
@@ -61,6 +65,10 @@ export function SettingsView({
   const [doctorState, setDoctorState] = useState<{
     status: "idle" | "running" | "done";
     result: CodexDoctorResult | null;
+  }>({ status: "idle", result: null });
+  const [claudeDoctorState, setClaudeDoctorState] = useState<{
+    status: "idle" | "running" | "done";
+    result: ClaudeDoctorResult | null;
   }>({ status: "idle", result: null });
   const [isSavingSettings, setIsSavingSettings] = useState(false);
 
@@ -82,6 +90,10 @@ export function SettingsView({
   }, [appSettings.codexBin]);
 
   useEffect(() => {
+    setClaudeCodePathDraft(appSettings.claudeCodeBin ?? "");
+  }, [appSettings.claudeCodeBin]);
+
+  useEffect(() => {
     setScaleDraft(`${Math.round(clampUiScale(appSettings.uiScale) * 100)}%`);
   }, [appSettings.uiScale]);
 
@@ -98,6 +110,9 @@ export function SettingsView({
 
   const codexDirty =
     (codexPathDraft.trim() || null) !== (appSettings.codexBin ?? null);
+
+  const claudeCodeDirty =
+    (claudeCodePathDraft.trim() || null) !== (appSettings.claudeCodeBin ?? null);
 
   const trimmedScale = scaleDraft.trim();
   const parsedPercent = trimmedScale
@@ -151,6 +166,53 @@ export function SettingsView({
       return;
     }
     setCodexPathDraft(selection);
+  };
+
+  const handleSaveClaudeCodeSettings = async () => {
+    setIsSavingSettings(true);
+    try {
+      await onUpdateAppSettings({
+        ...appSettings,
+        claudeCodeBin: claudeCodePathDraft.trim() ? claudeCodePathDraft.trim() : null,
+      });
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  const handleBrowseClaudeCode = async () => {
+    const selection = await open({ multiple: false, directory: false });
+    if (!selection || Array.isArray(selection)) {
+      return;
+    }
+    setClaudeCodePathDraft(selection);
+  };
+
+  const handleRunClaudeDoctor = async () => {
+    if (!onRunClaudeDoctor) {
+      return;
+    }
+    setClaudeDoctorState({ status: "running", result: null });
+    try {
+      const result = await onRunClaudeDoctor(
+        claudeCodePathDraft.trim() ? claudeCodePathDraft.trim() : null,
+      );
+      setClaudeDoctorState({ status: "done", result });
+    } catch (error) {
+      setClaudeDoctorState({
+        status: "done",
+        result: {
+          ok: false,
+          nodeOk: false,
+          nodeVersion: null,
+          nodeDetails: error instanceof Error ? error.message : String(error),
+          claudeOk: false,
+          claudeVersion: null,
+          claudeDetails: null,
+          path: null,
+        },
+      });
+    }
   };
 
   const handleRunDoctor = async () => {
@@ -213,11 +275,27 @@ export function SettingsView({
             </button>
             <button
               type="button"
+              className={`settings-nav ${activeSection === "claude-code" ? "active" : ""}`}
+              onClick={() => setActiveSection("claude-code")}
+            >
+              <TerminalSquare aria-hidden />
+              Claude Code
+            </button>
+            <button
+              type="button"
+              className={`settings-nav ${activeSection === "mcp-servers" ? "active" : ""}`}
+              onClick={() => setActiveSection("mcp-servers")}
+            >
+              <Zap aria-hidden />
+              MCP Servers
+            </button>
+            <button
+              type="button"
               className={`settings-nav ${activeSection === "codex" ? "active" : ""}`}
               onClick={() => setActiveSection("codex")}
             >
               <TerminalSquare aria-hidden />
-              Codex
+              Codex (Legacy)
             </button>
           </aside>
           <div className="settings-content">
@@ -336,9 +414,12 @@ export function SettingsView({
             )}
             {activeSection === "codex" && (
               <section className="settings-section">
-                <div className="settings-section-title">Codex</div>
+                <div className="settings-section-title">Codex (Legacy)</div>
                 <div className="settings-section-subtitle">
-                  Configure the Codex CLI used by CodexMonitor and validate the install.
+                  Legacy Codex CLI settings. CodexMonitor now uses Claude Code as the primary AI backend.
+                </div>
+                <div className="settings-deprecation-notice">
+                  This section is deprecated. Please use Claude Code settings instead.
                 </div>
                 <div className="settings-field">
                   <label className="settings-field-label" htmlFor="codex-path">
@@ -496,6 +577,176 @@ export function SettingsView({
                   </div>
                 </div>
 
+              </section>
+            )}
+            {activeSection === "claude-code" && (
+              <section className="settings-section">
+                <div className="settings-section-title">Claude Code</div>
+                <div className="settings-section-subtitle">
+                  Configure the Claude Code CLI for the new Claude Agent SDK integration.
+                </div>
+                <div className="settings-field">
+                  <label className="settings-field-label" htmlFor="claude-code-path">
+                    Claude Code executable path
+                  </label>
+                  <div className="settings-field-row">
+                    <input
+                      id="claude-code-path"
+                      className="settings-input"
+                      value={claudeCodePathDraft}
+                      placeholder="claude"
+                      onChange={(event) => setClaudeCodePathDraft(event.target.value)}
+                    />
+                    <button type="button" className="ghost" onClick={handleBrowseClaudeCode}>
+                      Browse
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setClaudeCodePathDraft("")}
+                    >
+                      Use PATH
+                    </button>
+                  </div>
+                  <div className="settings-help">
+                    Leave empty to use the system PATH resolution.
+                  </div>
+                  <div className="settings-field-actions">
+                    {claudeCodeDirty && (
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={handleSaveClaudeCodeSettings}
+                        disabled={isSavingSettings}
+                      >
+                        {isSavingSettings ? "Saving..." : "Save"}
+                      </button>
+                    )}
+                    {onRunClaudeDoctor && (
+                      <button
+                        type="button"
+                        className="ghost settings-button-compact"
+                        onClick={handleRunClaudeDoctor}
+                        disabled={claudeDoctorState.status === "running"}
+                      >
+                        <Stethoscope aria-hidden />
+                        {claudeDoctorState.status === "running" ? "Running..." : "Run doctor"}
+                      </button>
+                    )}
+                  </div>
+
+                  {claudeDoctorState.result && (
+                    <div
+                      className={`settings-doctor ${claudeDoctorState.result.ok ? "ok" : "error"}`}
+                    >
+                      <div className="settings-doctor-title">
+                        {claudeDoctorState.result.ok
+                          ? "Claude Code looks good"
+                          : "Claude Code issue detected"}
+                      </div>
+                      <div className="settings-doctor-body">
+                        <div>
+                          Claude:{" "}
+                          {claudeDoctorState.result.claudeOk
+                            ? `ok (${claudeDoctorState.result.claudeVersion ?? "unknown"})`
+                            : "not found"}
+                        </div>
+                        <div>
+                          Node:{" "}
+                          {claudeDoctorState.result.nodeOk
+                            ? `ok (${claudeDoctorState.result.nodeVersion ?? "unknown"})`
+                            : "missing"}
+                        </div>
+                        {claudeDoctorState.result.claudeDetails && (
+                          <div>{claudeDoctorState.result.claudeDetails}</div>
+                        )}
+                        {claudeDoctorState.result.nodeDetails && (
+                          <div>{claudeDoctorState.result.nodeDetails}</div>
+                        )}
+                        {claudeDoctorState.result.path && (
+                          <div className="settings-doctor-path">
+                            PATH: {claudeDoctorState.result.path}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="settings-field">
+                  <label className="settings-field-label" htmlFor="default-permission-mode">
+                    Default permission mode
+                  </label>
+                  <select
+                    id="default-permission-mode"
+                    className="settings-select"
+                    value={appSettings.defaultPermissionMode ?? "default"}
+                    onChange={(event) =>
+                      void onUpdateAppSettings({
+                        ...appSettings,
+                        defaultPermissionMode: event.target.value as AppSettings["defaultPermissionMode"],
+                      })
+                    }
+                  >
+                    <option value="default">Default (prompt for dangerous operations)</option>
+                    <option value="acceptEdits">Accept edits (auto-accept file edits)</option>
+                    <option value="plan">Plan mode (no tool execution)</option>
+                    <option value="dontAsk">Don&apos;t ask (deny if not pre-approved)</option>
+                  </select>
+                  <div className="settings-help">
+                    Controls how Claude Code handles tool permission requests.
+                  </div>
+                </div>
+              </section>
+            )}
+            {activeSection === "mcp-servers" && (
+              <section className="settings-section">
+                <div className="settings-section-title">MCP Servers</div>
+                <div className="settings-section-subtitle">
+                  Configure Model Context Protocol servers for extended capabilities.
+                </div>
+                {(appSettings.mcpServers ?? []).length > 0 ? (
+                  <div className="settings-mcp-list">
+                    {(appSettings.mcpServers ?? []).map((server) => (
+                      <div key={server.id} className="settings-toggle-row">
+                        <div>
+                          <div className="settings-toggle-title">{server.name}</div>
+                          <div className="settings-toggle-subtitle">
+                            {server.command ?? "No command configured"}
+                            {server.args && server.args.length > 0
+                              ? ` ${server.args.join(" ")}`
+                              : ""}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className={`settings-toggle ${server.enabled ? "on" : ""}`}
+                          onClick={() => {
+                            const nextServers = (appSettings.mcpServers ?? []).map((s) =>
+                              s.id === server.id ? { ...s, enabled: !s.enabled } : s
+                            );
+                            void onUpdateAppSettings({
+                              ...appSettings,
+                              mcpServers: nextServers,
+                            });
+                          }}
+                          aria-pressed={server.enabled}
+                        >
+                          <span className="settings-toggle-knob" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="settings-empty">
+                    No MCP servers configured. MCP servers can extend Claude&apos;s capabilities with
+                    additional tools and data sources.
+                  </div>
+                )}
+                <div className="settings-help" style={{ marginTop: "16px" }}>
+                  MCP servers are configured through Claude Code settings. See the Claude Code
+                  documentation for information on adding new servers.
+                </div>
               </section>
             )}
           </div>

@@ -1,11 +1,22 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
   ApprovalRequest,
   AppServerEvent,
+  ClaudeApprovalRequest,
+  ClaudeResultEvent,
+  ClaudeSessionStartedEvent,
+  ClaudeSessionClosedEvent,
+  ClaudeMessageDeltaEvent,
+  ClaudeMessageCompleteEvent,
+  ClaudeToolStartedEvent,
+  ClaudeToolProgressEvent,
+  ClaudeErrorEvent,
   ConversationItem,
   CustomPromptOption,
   DebugEntry,
+  ResultPayload,
   RateLimitSnapshot,
+  RewindDiffResult,
   ThreadTokenUsage,
   TurnPlan,
   TurnPlanStep,
@@ -22,8 +33,21 @@ import {
   archiveThread as archiveThreadService,
   getAccountRateLimits,
   interruptTurn as interruptTurnService,
+  // Claude Agent SDK service functions
+  claudeStartSession,
+  claudeResumeSession,
+  claudeSendMessage,
+  claudeInterrupt,
+  claudeRespondPermission,
+  claudeRewindToMessage,
+  // Registry service functions (Agent C)
+  getVisibleSessions,
+  registryArchiveSession,
+  getSessionHistory,
 } from "../services/tauri";
-import { useAppServerEvents } from "./useAppServerEvents";
+// Claude-native: Codex event handling disabled
+// import { useAppServerEvents } from "./useAppServerEvents";
+import { useClaudeEvents } from "./useClaudeEvents";
 import {
   buildConversationItem,
   buildItemsFromThread,
@@ -79,6 +103,7 @@ type UseThreadsOptions = {
   model?: string | null;
   effort?: string | null;
   accessMode?: "read-only" | "current" | "full-access";
+  permissionMode?: "default" | "acceptEdits" | "plan" | "dontAsk";
   customPrompts?: CustomPromptOption[];
   onMessageActivity?: () => void;
 };
@@ -147,6 +172,13 @@ function asNumber(value: unknown): number {
   return 0;
 }
 
+function createMessageId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function normalizeTokenUsage(raw: Record<string, unknown>): ThreadTokenUsage {
   const total = (raw.total as Record<string, unknown>) ?? {};
   const last = (raw.last as Record<string, unknown>) ?? {};
@@ -182,6 +214,31 @@ function normalizeTokenUsage(raw: Record<string, unknown>): ThreadTokenUsage {
       }
       return null;
     })(),
+  };
+}
+
+function normalizeClaudeUsage(usage: ResultPayload["usage"]): ThreadTokenUsage {
+  const inputTokens = usage.inputTokens ?? 0;
+  const outputTokens = usage.outputTokens ?? 0;
+  const cachedInputTokens = usage.cacheReadInputTokens ?? 0;
+  const totalTokens = inputTokens + outputTokens;
+
+  return {
+    total: {
+      totalTokens,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens: 0, // Claude SDK doesn't separate reasoning tokens in result
+    },
+    last: {
+      totalTokens,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens: 0,
+    },
+    modelContextWindow: null, // Not provided in Claude result events
   };
 }
 
@@ -259,6 +316,14 @@ function normalizeRateLimits(raw: Record<string, unknown>): RateLimitSnapshot {
   };
 }
 
+function normalizeStreamingText(text: string): string {
+  if (!text) {
+    return "";
+  }
+  const unified = text.replace(/\r\n/g, "\n");
+  return unified.replace(/([^\n])\n(?!\n)(?![-*]\s)(?!\d+\.\s)(?!```)/g, "$1 ");
+}
+
 function normalizePlanStepStatus(value: unknown): TurnPlanStepStatus {
   const raw = typeof value === "string" ? value : "";
   const normalized = raw.replace(/[_\s-]/g, "").toLowerCase();
@@ -331,12 +396,15 @@ export function useThreads({
   model,
   effort,
   accessMode,
+  permissionMode,
   customPrompts = [],
   onMessageActivity,
 }: UseThreadsOptions) {
   const [state, dispatch] = useReducer(threadReducer, initialState);
   const loadedThreads = useRef<Record<string, boolean>>({});
   const threadActivityRef = useRef<ThreadActivityMap>(loadThreadActivity());
+  const streamingMessageIds = useRef<Record<string, string>>({});
+  const pendingSessionByWorkspace = useRef<Record<string, string>>({});
 
   const recordThreadActivity = useCallback(
     (workspaceId: string, threadId: string, timestamp = Date.now()) => {
@@ -489,7 +557,8 @@ export function useThreads({
     [onWorkspaceConnected, refreshAccountRateLimits],
   );
 
-  const handlers = useMemo(
+  // Claude-native: Codex handlers kept for reference but not used
+  const _handlers = useMemo(
     () => ({
       onWorkspaceConnected: handleWorkspaceConnected,
       onApprovalRequest: (approval: ApprovalRequest) => {
@@ -685,9 +754,343 @@ export function useThreads({
     ],
   );
 
-  useAppServerEvents(handlers);
+  // Claude-native: Codex event handling disabled
+  // useAppServerEvents(handlers);
 
-  const startThreadForWorkspace = useCallback(
+  // Claude Agent SDK event handlers
+  // Events have shape: { type, sessionId, workspaceId, timestamp, payload }
+  const claudeHandlers = useMemo(
+    () => ({
+      onSessionStarted: (event: ClaudeSessionStartedEvent) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-session-started`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/session/started",
+          payload: event,
+        });
+        const pendingId = pendingSessionByWorkspace.current[event.workspaceId];
+        if (pendingId && pendingId !== event.sessionId) {
+          dispatch({
+            type: "migrateThread",
+            workspaceId: event.workspaceId,
+            fromThreadId: pendingId,
+            toThreadId: event.sessionId,
+          });
+          pendingSessionByWorkspace.current[event.workspaceId] = event.sessionId;
+        } else {
+          dispatch({ type: "ensureThread", workspaceId: event.workspaceId, threadId: event.sessionId });
+        }
+        dispatch({ type: "setActiveThreadId", workspaceId: event.workspaceId, threadId: event.sessionId });
+        loadedThreads.current[event.sessionId] = true;
+      },
+
+      onSessionClosed: (event: ClaudeSessionClosedEvent) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-session-closed`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/session/closed",
+          payload: event,
+        });
+        markProcessing(event.sessionId, false);
+      },
+
+      onMessageDelta: (event: ClaudeMessageDeltaEvent) => {
+        dispatch({ type: "ensureThread", workspaceId: event.workspaceId, threadId: event.sessionId });
+        markProcessing(event.sessionId, true);
+        // Extract text delta from the SDK event
+        // The payload.event is a BetaRawMessageStreamEvent which may have delta content
+        const sdkEvent = event.payload.event as {
+          type?: string;
+          delta?: { type?: string; text?: string };
+          content_block?: { type?: string };
+        };
+        if (sdkEvent?.type === "message_start") {
+          if (!streamingMessageIds.current[event.sessionId]) {
+            const streamingId = event.payload.uuid
+              ? `msg-${event.sessionId}-${event.payload.uuid}`
+              : `msg-${event.sessionId}-${Date.now()}`;
+            streamingMessageIds.current[event.sessionId] = streamingId;
+          }
+        }
+        if (sdkEvent?.type === "content_block_start") {
+          if (
+            !streamingMessageIds.current[event.sessionId] &&
+            sdkEvent.content_block?.type === "text"
+          ) {
+            const streamingId = event.payload.uuid
+              ? `msg-${event.sessionId}-${event.payload.uuid}`
+              : `msg-${event.sessionId}-${Date.now()}`;
+            streamingMessageIds.current[event.sessionId] = streamingId;
+          }
+        }
+        if (sdkEvent?.type === "content_block_delta" && sdkEvent?.delta?.type === "text_delta" && sdkEvent?.delta?.text) {
+          if (!streamingMessageIds.current[event.sessionId]) {
+            const streamingId = event.payload.uuid
+              ? `msg-${event.sessionId}-${event.payload.uuid}`
+              : `msg-${event.sessionId}-${Date.now()}`;
+            streamingMessageIds.current[event.sessionId] = streamingId;
+          }
+          const streamingId = streamingMessageIds.current[event.sessionId]!;
+          dispatch({
+            type: "appendAgentDelta",
+            threadId: event.sessionId,
+            itemId: streamingId,
+            delta: normalizeStreamingText(sdkEvent.delta.text),
+          });
+        }
+        safeMessageActivity();
+      },
+
+      onMessageComplete: (event: ClaudeMessageCompleteEvent) => {
+        const timestamp = Date.now();
+        dispatch({ type: "ensureThread", workspaceId: event.workspaceId, threadId: event.sessionId });
+        // Extract final text from the BetaMessage
+        const betaMessage = event.payload.message as { content?: Array<Record<string, unknown>> };
+        const textContent = betaMessage?.content?.find(
+          (c) => (c as { type?: string }).type === "text",
+        ) as { text?: unknown } | undefined;
+        const text = typeof textContent?.text === "string" ? normalizeStreamingText(textContent.text) : "";
+        const itemId =
+          streamingMessageIds.current[event.sessionId]
+          ?? (event.payload.uuid
+            ? `msg-${event.sessionId}-${event.payload.uuid}`
+            : `msg-${event.sessionId}-${Date.now()}`);
+        if (text.trim()) {
+          dispatch({ type: "completeAgentMessage", threadId: event.sessionId, itemId, text });
+        }
+        const contentBlocks = betaMessage?.content ?? [];
+        contentBlocks.forEach((block) => {
+          if ((block as { type?: string }).type === "tool_use") {
+            const toolUseId =
+              (block.id as string | undefined)
+              ?? (block.tool_use_id as string | undefined)
+              ?? (block.toolUseId as string | undefined);
+            if (!toolUseId) {
+              return;
+            }
+            const toolName =
+              (block.name as string | undefined)
+              ?? (block.tool_name as string | undefined)
+              ?? "tool";
+            const toolItem: ConversationItem = {
+              id: `tool-${toolUseId}`,
+              kind: "tool",
+              toolType: toolName,
+              title: toolName,
+              detail: JSON.stringify(block.input ?? {}, null, 2),
+              status: "running",
+            };
+            dispatch({ type: "upsertItem", threadId: event.sessionId, item: toolItem });
+          }
+          if ((block as { type?: string }).type === "tool_result") {
+            const toolUseId =
+              (block.tool_use_id as string | undefined)
+              ?? (block.toolUseId as string | undefined);
+            if (!toolUseId) {
+              return;
+            }
+            const output =
+              typeof block.output === "string"
+                ? block.output
+                : block.content
+                  ? JSON.stringify(block.content, null, 2)
+                  : JSON.stringify(block, null, 2);
+            const toolItem: ConversationItem = {
+              id: `tool-${toolUseId}`,
+              kind: "tool",
+              toolType: "tool",
+              title: "tool",
+              detail: "",
+              status: "completed",
+              output,
+            };
+            dispatch({ type: "upsertItem", threadId: event.sessionId, item: toolItem });
+          }
+        });
+        delete streamingMessageIds.current[event.sessionId];
+        if (text) {
+          dispatch({
+            type: "setLastAgentMessage",
+            threadId: event.sessionId,
+            text,
+            timestamp,
+          });
+        }
+        markProcessing(event.sessionId, false);
+        recordThreadActivity(event.workspaceId, event.sessionId, timestamp);
+        safeMessageActivity();
+        if (event.sessionId !== activeThreadId) {
+          dispatch({ type: "markUnread", threadId: event.sessionId, hasUnread: true });
+        }
+      },
+
+      onToolStarted: (event: ClaudeToolStartedEvent) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-tool-started`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/tool/started",
+          payload: event,
+        });
+        markProcessing(event.sessionId, true);
+        // Optionally show tool in conversation
+        const toolItem: ConversationItem = {
+          id: `tool-${event.payload.toolUseId}`,
+          kind: "tool",
+          toolType: event.payload.toolName,
+          title: event.payload.toolName,
+          detail: JSON.stringify(event.payload.input, null, 2),
+          status: "running",
+        };
+        dispatch({ type: "upsertItem", threadId: event.sessionId, item: toolItem });
+      },
+
+      onToolProgress: (event: ClaudeToolProgressEvent) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-tool-progress`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/tool/progress",
+          payload: event,
+        });
+        markProcessing(event.sessionId, true);
+        // Update tool item with elapsed time
+        const toolItem: ConversationItem = {
+          id: `tool-${event.payload.toolUseId}`,
+          kind: "tool",
+          toolType: event.payload.toolName,
+          title: event.payload.toolName,
+          detail: "",
+          status: "running",
+          elapsedSeconds: event.payload.elapsedSeconds,
+        };
+        dispatch({ type: "upsertItem", threadId: event.sessionId, item: toolItem });
+      },
+
+      onToolCompleted: (event: { sessionId: string; workspaceId: string; timestamp: number; payload: { toolName: string; toolUseId: string; output: unknown } }) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-tool-completed`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/tool/completed",
+          payload: event,
+        });
+        // Update tool status to completed
+        const output = typeof event.payload.output === "string"
+          ? event.payload.output
+          : JSON.stringify(event.payload.output, null, 2);
+        const toolItem: ConversationItem = {
+          id: `tool-${event.payload.toolUseId}`,
+          kind: "tool",
+          toolType: event.payload.toolName,
+          title: event.payload.toolName,
+          detail: "",
+          status: "completed",
+          output,
+        };
+        dispatch({ type: "upsertItem", threadId: event.sessionId, item: toolItem });
+      },
+
+      onResult: (event: ClaudeResultEvent) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-result`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/result",
+          payload: event,
+        });
+        markProcessing(event.sessionId, false);
+        dispatch({ type: "setActiveTurnId", threadId: event.sessionId, turnId: null });
+        // Update token usage from result payload
+        if (event.payload.usage) {
+          dispatch({
+            type: "setThreadTokenUsage",
+            threadId: event.sessionId,
+            tokenUsage: normalizeClaudeUsage(event.payload.usage),
+          });
+        }
+        // Handle errors in result
+        if (!event.payload.success && event.payload.errors?.length) {
+          pushThreadErrorMessage(event.sessionId, `Error: ${event.payload.errors.join(", ")}`);
+        }
+        dispatch({ type: "completeRunningTools", threadId: event.sessionId });
+        delete streamingMessageIds.current[event.sessionId];
+      },
+
+      onApprovalRequest: (request: ClaudeApprovalRequest) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-permission-request`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/permission/request",
+          payload: request,
+        });
+        dispatch({ type: "addApproval", approval: request });
+      },
+
+      onError: (event: ClaudeErrorEvent) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "claude/error",
+          payload: event,
+        });
+        if (!event.payload.recoverable) {
+          dispatch({ type: "ensureThread", workspaceId: event.workspaceId, threadId: event.sessionId });
+          markProcessing(event.sessionId, false);
+          dispatch({ type: "setActiveTurnId", threadId: event.sessionId, turnId: null });
+          pushThreadErrorMessage(event.sessionId, `Error: ${event.payload.message}`);
+          safeMessageActivity();
+        }
+      },
+
+      onBridgeConnected: (workspaceId: string, payload: unknown) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-bridge-connected`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/bridge/connected",
+          payload: { workspaceId, payload },
+        });
+      },
+
+      onBridgeStderr: (workspaceId: string, message: string) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-bridge-stderr`,
+          timestamp: Date.now(),
+          source: "stderr",
+          label: "claude/bridge/stderr",
+          payload: { workspaceId, message },
+        });
+      },
+
+      onRawEvent: (event: unknown) => {
+        onDebug?.({
+          id: `${Date.now()}-claude-raw-event`,
+          timestamp: Date.now(),
+          source: "event",
+          label: "claude/raw",
+          payload: event,
+        });
+      },
+    }),
+    [
+      activeThreadId,
+      markProcessing,
+      onDebug,
+      pushThreadErrorMessage,
+      recordThreadActivity,
+      safeMessageActivity,
+    ],
+  );
+
+  useClaudeEvents(claudeHandlers);
+
+  // Claude-native: Codex functions kept for reference but not used
+  const _startThreadForWorkspace = useCallback(
     async (workspaceId: string) => {
       onDebug?.({
         id: `${Date.now()}-client-thread-start`,
@@ -728,12 +1131,12 @@ export function useThreads({
     [onDebug],
   );
 
-  const startThread = useCallback(async () => {
+  const _startThread = useCallback(async () => {
     if (!activeWorkspaceId) {
       return null;
     }
-    return startThreadForWorkspace(activeWorkspaceId);
-  }, [activeWorkspaceId, startThreadForWorkspace]);
+    return _startThreadForWorkspace(activeWorkspaceId);
+  }, [activeWorkspaceId, _startThreadForWorkspace]);
 
   const resumeThreadForWorkspace = useCallback(
     async (workspaceId: string, threadId: string, force = false) => {
@@ -940,13 +1343,13 @@ export function useThreads({
     [onDebug],
   );
 
-  const ensureThreadForActiveWorkspace = useCallback(async () => {
+  const _ensureThreadForActiveWorkspace = useCallback(async () => {
     if (!activeWorkspace) {
       return null;
     }
     let threadId = activeThreadId;
     if (!threadId) {
-      threadId = await startThreadForWorkspace(activeWorkspace.id);
+      threadId = await _startThreadForWorkspace(activeWorkspace.id);
       if (!threadId) {
         return null;
       }
@@ -954,7 +1357,7 @@ export function useThreads({
       await resumeThreadForWorkspace(activeWorkspace.id, threadId);
     }
     return threadId;
-  }, [activeWorkspace, activeThreadId, resumeThreadForWorkspace, startThreadForWorkspace]);
+  }, [activeWorkspace, activeThreadId, resumeThreadForWorkspace, _startThreadForWorkspace]);
 
   const sendUserMessage = useCallback(
     async (text: string, images: string[] = []) => {
@@ -979,7 +1382,7 @@ export function useThreads({
         return;
       }
       const finalText = promptExpansion?.expanded ?? messageText;
-      const threadId = await ensureThreadForActiveWorkspace();
+      const threadId = await _ensureThreadForActiveWorkspace();
       if (!threadId) {
         return;
       }
@@ -1077,7 +1480,7 @@ export function useThreads({
       onDebug,
       pushThreadErrorMessage,
       recordThreadActivity,
-      ensureThreadForActiveWorkspace,
+      _ensureThreadForActiveWorkspace,
       safeMessageActivity,
     ],
   );
@@ -1137,7 +1540,7 @@ export function useThreads({
       if (!activeWorkspace || !text.trim()) {
         return;
       }
-      const threadId = await ensureThreadForActiveWorkspace();
+      const threadId = await _ensureThreadForActiveWorkspace();
       if (!threadId) {
         return;
       }
@@ -1209,7 +1612,7 @@ export function useThreads({
     },
     [
       activeWorkspace,
-      ensureThreadForActiveWorkspace,
+      _ensureThreadForActiveWorkspace,
       markProcessing,
       onDebug,
       pushThreadErrorMessage,
@@ -1218,29 +1621,32 @@ export function useThreads({
   );
 
   const handleApprovalDecision = useCallback(
-    async (request: ApprovalRequest, decision: "accept" | "decline") => {
-      await respondToServerRequest(
-        request.workspace_id,
-        request.request_id,
-        decision,
-      );
-      dispatch({ type: "removeApproval", requestId: request.request_id });
+    async (
+      request: ApprovalRequest | ClaudeApprovalRequest,
+      decision: "accept" | "decline",
+    ) => {
+      // Check if this is a Claude approval request (has tool_use_id)
+      if ("tool_use_id" in request && "session_id" in request) {
+        // Handle Claude permission request
+        // claudeRespondPermission args: sessionId, toolUseId, decision, message?
+        await claudeRespondPermission(
+          request.session_id,
+          request.tool_use_id,
+          decision === "accept" ? "allow" : "deny",
+          decision === "decline" ? "User declined" : undefined,
+        );
+        dispatch({ type: "removeApproval", requestId: request.tool_use_id });
+      } else {
+        // Handle Codex approval request
+        await respondToServerRequest(
+          request.workspace_id,
+          request.request_id,
+          decision,
+        );
+        dispatch({ type: "removeApproval", requestId: request.request_id });
+      }
     },
     [],
-  );
-
-  const setActiveThreadId = useCallback(
-    (threadId: string | null, workspaceId?: string) => {
-      const targetId = workspaceId ?? activeWorkspaceId;
-      if (!targetId) {
-        return;
-      }
-      dispatch({ type: "setActiveThreadId", workspaceId: targetId, threadId });
-      if (threadId) {
-        void resumeThreadForWorkspace(targetId, threadId, true);
-      }
-    },
-    [activeWorkspaceId, resumeThreadForWorkspace],
   );
 
   const removeThread = useCallback((workspaceId: string, threadId: string) => {
@@ -1260,12 +1666,499 @@ export function useThreads({
     })();
   }, [onDebug]);
 
+  // ============================================================================
+  // Claude Agent SDK Session Management Functions
+  // ============================================================================
+
+  /**
+   * Create a new Claude session for the active workspace.
+   */
+  const startClaudeSession = useCallback(async (
+    workspaceOverride?: { id: string; path: string }
+  ) => {
+    const targetWorkspace = workspaceOverride ?? activeWorkspace;
+    const targetWorkspaceId = workspaceOverride?.id ?? activeWorkspaceId;
+    if (!targetWorkspace || !targetWorkspaceId) {
+      return null;
+    }
+    onDebug?.({
+      id: `${Date.now()}-client-claude-session-create`,
+      timestamp: Date.now(),
+      source: "client",
+      label: "claude/session/start",
+      payload: { workspaceId: targetWorkspaceId, cwd: targetWorkspace.path, model },
+    });
+    try {
+      const response = await claudeStartSession(targetWorkspaceId, targetWorkspace.path, {
+        model: model ?? undefined,
+        permissionMode,
+      });
+      onDebug?.({
+        id: `${Date.now()}-server-claude-session-create`,
+        timestamp: Date.now(),
+        source: "server",
+        label: "claude/session/start response",
+        payload: response,
+      });
+      const pendingSessionId = response.result?.sessionId ?? null;
+      if (pendingSessionId) {
+        pendingSessionByWorkspace.current[targetWorkspaceId] = pendingSessionId;
+        dispatch({ type: "ensureThread", workspaceId: targetWorkspaceId, threadId: pendingSessionId });
+        dispatch({ type: "setActiveThreadId", workspaceId: targetWorkspaceId, threadId: pendingSessionId });
+      }
+      // Session will be reconciled via onSessionStarted event
+      return pendingSessionId;
+    } catch (error) {
+      onDebug?.({
+        id: `${Date.now()}-client-claude-session-create-error`,
+        timestamp: Date.now(),
+        source: "error",
+        label: "claude/session/start error",
+        payload: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }, [activeWorkspaceId, activeWorkspace, model, onDebug, permissionMode]);
+
+  /**
+   * Resume an existing Claude session.
+   */
+  const loadClaudeHistory = useCallback(
+    async (workspaceId: string, sessionId: string, force = false) => {
+      const existingItems = state.itemsByThread[sessionId] ?? [];
+      if (!force && existingItems.length > 0) {
+        return;
+      }
+      try {
+        const history = await getSessionHistory(sessionId);
+        if (history.items.length > 0) {
+          dispatch({
+            type: "setThreadItems",
+            threadId: sessionId,
+            items: history.items,
+          });
+        }
+        if (history.preview) {
+          dispatch({
+            type: "setThreadName",
+            workspaceId,
+            threadId: sessionId,
+            name: previewThreadName(history.preview, `Agent ${sessionId.slice(0, 4)}`),
+          });
+          dispatch({
+            type: "setLastAgentMessage",
+            threadId: sessionId,
+            text: history.preview,
+            timestamp: history.lastActivity || Date.now(),
+          });
+        }
+      } catch (error) {
+        onDebug?.({
+          id: `${Date.now()}-client-claude-session-history-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "claude/session/history error",
+          payload: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [onDebug, state.itemsByThread],
+  );
+
+  /**
+   * Resume an existing Claude session.
+   */
+  const resumeClaudeSession = useCallback(
+    async (workspaceId: string, sessionId: string, force = false) => {
+      if (!sessionId) {
+        return null;
+      }
+      if (!force && loadedThreads.current[sessionId]) {
+        return sessionId;
+      }
+      onDebug?.({
+        id: `${Date.now()}-client-claude-session-resume`,
+        timestamp: Date.now(),
+        source: "client",
+        label: "claude/session/resume",
+        payload: { workspaceId, sessionId },
+      });
+      try {
+        const response = await claudeResumeSession(workspaceId, sessionId);
+        onDebug?.({
+          id: `${Date.now()}-server-claude-session-resume`,
+          timestamp: Date.now(),
+          source: "server",
+          label: "claude/session/resume response",
+          payload: response,
+        });
+        await loadClaudeHistory(workspaceId, sessionId, true);
+        loadedThreads.current[sessionId] = true;
+        return sessionId;
+      } catch (error) {
+        onDebug?.({
+          id: `${Date.now()}-client-claude-session-resume-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "claude/session/resume error",
+          payload: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    },
+    [onDebug],
+  );
+
+  const setActiveThreadId = useCallback(
+    (threadId: string | null, workspaceId?: string) => {
+      const targetId = workspaceId ?? activeWorkspaceId;
+      if (!targetId) {
+        return;
+      }
+      dispatch({ type: "setActiveThreadId", workspaceId: targetId, threadId });
+      if (threadId) {
+        void resumeClaudeSession(targetId, threadId, true);
+        void loadClaudeHistory(targetId, threadId, false);
+      }
+    },
+    [activeWorkspaceId, loadClaudeHistory, resumeClaudeSession],
+  );
+
+  /**
+   * Send a message to a Claude session.
+   */
+  const sendClaudeMessage = useCallback(
+    async (text: string, images: string[] = []) => {
+      if (!activeWorkspace || (!text.trim() && images.length === 0)) {
+        return;
+      }
+      const messageText = text.trim();
+
+      // Ensure we have a session
+      let sessionId = activeThreadId;
+      if (!sessionId) {
+        sessionId = await startClaudeSession();
+        if (!sessionId) {
+          return;
+        }
+      }
+
+      const messageId = createMessageId();
+      recordThreadActivity(activeWorkspace.id, sessionId);
+      dispatch({
+        type: "addUserMessage",
+        workspaceId: activeWorkspace.id,
+        threadId: sessionId,
+        text: messageText,
+        images,
+        messageId,
+      });
+      dispatch({
+        type: "setThreadName",
+        workspaceId: activeWorkspace.id,
+        threadId: sessionId,
+        name: previewThreadName(messageText, `Agent ${sessionId.slice(0, 4)}`),
+      });
+      markProcessing(sessionId, true);
+      safeMessageActivity();
+
+      onDebug?.({
+        id: `${Date.now()}-client-claude-message-send`,
+        timestamp: Date.now(),
+        source: "client",
+        label: "claude/message/send",
+        payload: {
+          workspaceId: activeWorkspace.id,
+          sessionId,
+          text: messageText,
+          images,
+        },
+      });
+
+      try {
+        // claudeSendMessage args: sessionId, workspaceId, message, images
+        await claudeSendMessage(
+          sessionId,
+          activeWorkspace.id,
+          messageText,
+          images.length > 0 ? images : undefined,
+          messageId,
+        );
+      } catch (error) {
+        markProcessing(sessionId, false);
+        onDebug?.({
+          id: `${Date.now()}-client-claude-message-send-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "claude/message/send error",
+          payload: error instanceof Error ? error.message : String(error),
+        });
+        pushThreadErrorMessage(
+          sessionId,
+          error instanceof Error ? error.message : String(error),
+        );
+        safeMessageActivity();
+      }
+    },
+    [
+      activeWorkspace,
+      activeThreadId,
+      markProcessing,
+      onDebug,
+      pushThreadErrorMessage,
+      recordThreadActivity,
+      safeMessageActivity,
+      startClaudeSession,
+    ],
+  );
+
+  /**
+   * Interrupt the active Claude session.
+   */
+  const interruptClaudeSession = useCallback(async () => {
+    if (!activeWorkspace || !activeThreadId) {
+      return;
+    }
+    markProcessing(activeThreadId, false);
+    dispatch({ type: "setActiveTurnId", threadId: activeThreadId, turnId: null });
+    dispatch({
+      type: "addAssistantMessage",
+      threadId: activeThreadId,
+      text: "Session interrupted.",
+    });
+    onDebug?.({
+      id: `${Date.now()}-client-claude-session-interrupt`,
+      timestamp: Date.now(),
+      source: "client",
+      label: "claude/session/interrupt",
+      payload: {
+        workspaceId: activeWorkspace.id,
+        sessionId: activeThreadId,
+      },
+    });
+    try {
+      // claudeInterrupt only takes sessionId
+      await claudeInterrupt(activeThreadId);
+    } catch (error) {
+      onDebug?.({
+        id: `${Date.now()}-client-claude-session-interrupt-error`,
+        timestamp: Date.now(),
+        source: "error",
+        label: "claude/session/interrupt error",
+        payload: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [activeThreadId, activeWorkspace, markProcessing, onDebug]);
+
+  /**
+   * List visible Claude sessions for a workspace (from registry).
+   */
+  const listClaudeSessions = useCallback(
+    async (workspace: WorkspaceInfo) => {
+      dispatch({
+        type: "setThreadListLoading",
+        workspaceId: workspace.id,
+        isLoading: true,
+      });
+      onDebug?.({
+        id: `${Date.now()}-client-claude-sessions-list`,
+        timestamp: Date.now(),
+        source: "client",
+        label: "claude/sessions/list",
+        payload: { workspaceId: workspace.id },
+      });
+      try {
+        const sessions = await getVisibleSessions(workspace.id);
+        onDebug?.({
+          id: `${Date.now()}-server-claude-sessions-list`,
+          timestamp: Date.now(),
+          source: "server",
+          label: "claude/sessions/list response",
+          payload: sessions,
+        });
+        const summaries = sessions.map((session) => ({
+          id: session.sessionId,
+          name: session.preview || `Agent ${session.sessionId.slice(0, 4)}`,
+          status: session.status,
+        }));
+        dispatch({
+          type: "setThreads",
+          workspaceId: workspace.id,
+          threads: summaries,
+        });
+        // Update last agent messages for each session
+        sessions.forEach((session) => {
+          if (session.preview) {
+            dispatch({
+              type: "setLastAgentMessage",
+              threadId: session.sessionId,
+              text: session.preview,
+              timestamp: session.lastActivity,
+            });
+          }
+        });
+      } catch (error) {
+        onDebug?.({
+          id: `${Date.now()}-client-claude-sessions-list-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "claude/sessions/list error",
+          payload: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        dispatch({
+          type: "setThreadListLoading",
+          workspaceId: workspace.id,
+          isLoading: false,
+        });
+      }
+    },
+    [onDebug],
+  );
+
+  /**
+   * Archive a Claude session (removes from registry, keeps data on disk).
+   */
+  const archiveClaudeSession = useCallback(
+    (workspaceId: string, sessionId: string) => {
+      dispatch({ type: "removeThread", workspaceId, threadId: sessionId });
+      (async () => {
+        try {
+          await registryArchiveSession(workspaceId, sessionId);
+        } catch (error) {
+          onDebug?.({
+            id: `${Date.now()}-client-claude-session-archive-error`,
+            timestamp: Date.now(),
+            source: "error",
+            label: "claude/session/archive error",
+            payload: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })();
+    },
+    [onDebug],
+  );
+
+  /**
+   * Handle Claude permission request decisions.
+   * Uses tool_use_id as the identifier (backend key for permission tracking).
+   */
+  const handleClaudeApprovalDecision = useCallback(
+    async (request: ClaudeApprovalRequest, decision: "allow" | "deny") => {
+      onDebug?.({
+        id: `${Date.now()}-client-claude-permission-respond`,
+        timestamp: Date.now(),
+        source: "client",
+        label: "claude/permission/respond",
+        payload: { request, decision },
+      });
+      try {
+        // claudeRespondPermission args: sessionId, toolUseId, decision, message?
+        await claudeRespondPermission(
+          request.session_id,
+          request.tool_use_id,
+          decision,
+          decision === "deny" ? "User denied" : undefined,
+        );
+        // Use tool_use_id for removal since that's the unique identifier
+        dispatch({ type: "removeApproval", requestId: request.tool_use_id });
+      } catch (error) {
+        onDebug?.({
+          id: `${Date.now()}-client-claude-permission-respond-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "claude/permission/respond error",
+          payload: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [onDebug],
+  );
+
+  // Rewind state
+  const [isRewinding, setIsRewinding] = useState(false);
+  const [rewindResult, setRewindResult] = useState<RewindDiffResult | null>(null);
+
+  /**
+   * Rewind a Claude session to a specific message.
+   * This restores file checkpoints and truncates conversation history.
+   */
+  const rewindToMessage = useCallback(
+    async (itemId: string, itemIndex: number) => {
+      if (!activeThreadId || isRewinding) return;
+      setIsRewinding(true);
+      setRewindResult(null);
+      onDebug?.({
+        id: `${Date.now()}-client-claude-rewind`,
+        timestamp: Date.now(),
+        source: "client",
+        label: "claude/rewind",
+        payload: { sessionId: activeThreadId, messageId: itemId, itemIndex },
+      });
+      try {
+        const result = await claudeRewindToMessage(activeThreadId, itemId);
+        onDebug?.({
+          id: `${Date.now()}-server-claude-rewind`,
+          timestamp: Date.now(),
+          source: "server",
+          label: "claude/rewind response",
+          payload: result,
+        });
+        if (result.canRewind) {
+          // Truncate items after the target index
+          dispatch({
+            type: "truncateItems",
+            threadId: activeThreadId,
+            afterIndex: itemIndex,
+          });
+          const insertions = result.insertions ?? 0;
+          const deletions = result.deletions ?? 0;
+          if (insertions > 0 || deletions > 0) {
+            setRewindResult({
+              filesChanged: result.filesChanged?.length ?? 0,
+              additions: insertions,
+              deletions,
+            });
+          }
+        }
+      } catch (error) {
+        onDebug?.({
+          id: `${Date.now()}-client-claude-rewind-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "claude/rewind error",
+          payload: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setIsRewinding(false);
+      }
+    },
+    [activeThreadId, isRewinding, onDebug],
+  );
+
+  const clearRewindResult = useCallback(() => {
+    setRewindResult(null);
+  }, []);
+
   useEffect(() => {
     if (activeWorkspace?.connected) {
       void refreshAccountRateLimits(activeWorkspace.id);
     }
   }, [activeWorkspace?.connected, activeWorkspace?.id, refreshAccountRateLimits]);
 
+  // Legacy Codex paths kept for reference; mark as used to satisfy noUnusedLocals.
+  void {
+    _handlers,
+    _startThread,
+    listThreadsForWorkspace,
+    sendUserMessage,
+    interruptTurn,
+    removeThread,
+    handleClaudeApprovalDecision,
+  };
+
+  // Claude-native: Primary exports use Claude implementations
+  // Codex functions are kept internally for reference but not exported
   return {
     activeThreadId,
     setActiveThreadId,
@@ -1280,13 +2173,25 @@ export function useThreads({
     planByThread: state.planByThread,
     lastAgentMessageByThread: state.lastAgentMessageByThread,
     refreshAccountRateLimits,
-    interruptTurn,
-    removeThread,
-    startThread,
-    startThreadForWorkspace,
-    listThreadsForWorkspace,
-    sendUserMessage,
-    startReview,
+    // Primary thread lifecycle functions → routed to Claude
+    interruptTurn: interruptClaudeSession,
+    removeThread: archiveClaudeSession,
+    startThread: startClaudeSession,
+    startThreadForWorkspace: async (workspaceId: string, workspacePath?: string) => {
+      if (workspacePath) {
+        return startClaudeSession({ id: workspaceId, path: workspacePath });
+      }
+      return startClaudeSession();
+    },
+    listThreadsForWorkspace: listClaudeSessions,
+    listClaudeSessions, // Alias for App.tsx compatibility
+    sendUserMessage: sendClaudeMessage,
+    startReview, // Keep Codex review for now (no Claude equivalent yet)
     handleApprovalDecision,
+    // Rewind functionality (Phase 3)
+    isRewinding,
+    rewindResult,
+    rewindToMessage,
+    clearRewindResult,
   };
 }

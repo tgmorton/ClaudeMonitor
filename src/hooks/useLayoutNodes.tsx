@@ -15,7 +15,6 @@ import { TabBar } from "../components/TabBar";
 import { TabletNav } from "../components/TabletNav";
 import type {
   AccessMode,
-  ApprovalRequest,
   BranchInfo,
   ConversationItem,
   CustomPromptOption,
@@ -33,6 +32,7 @@ import type {
   TurnPlan,
   WorkspaceInfo,
 } from "../types";
+import type { UnifiedApprovalRequest } from "./useThreadsReducer";
 import type { UpdateState } from "./useUpdater";
 
 type ThreadActivityStatus = {
@@ -52,15 +52,18 @@ type GitDiffViewerItem = {
 type LayoutNodesOptions = {
   workspaces: WorkspaceInfo[];
   threadsByWorkspace: Record<string, ThreadSummary[]>;
+  archivedThreadsByWorkspace: Record<string, ThreadSummary[]>;
   threadStatusById: Record<string, ThreadActivityStatus>;
   threadListLoadingByWorkspace: Record<string, boolean>;
   activeWorkspaceId: string | null;
   activeThreadId: string | null;
   activeItems: ConversationItem[];
   activeRateLimits: RateLimitSnapshot | null;
-  approvals: ApprovalRequest[];
+  showArchivedSessions: boolean;
+  onToggleShowArchived: () => void;
+  approvals: UnifiedApprovalRequest[];
   handleApprovalDecision: (
-    request: ApprovalRequest,
+    request: UnifiedApprovalRequest,
     decision: "accept" | "decline",
   ) => void;
   onOpenSettings: () => void;
@@ -72,9 +75,11 @@ type LayoutNodesOptions = {
   onConnectWorkspace: (workspace: WorkspaceInfo) => Promise<void>;
   onAddAgent: (workspace: WorkspaceInfo) => Promise<void>;
   onAddWorktreeAgent: (workspace: WorkspaceInfo) => Promise<void>;
+  onImportSessions: (workspace: WorkspaceInfo) => void;
   onToggleWorkspaceCollapse: (workspaceId: string, collapsed: boolean) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onDeleteThread: (workspaceId: string, threadId: string) => void;
+  onUnarchiveThread: (workspaceId: string, threadId: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
   onDeleteWorktree: (workspaceId: string) => void;
   updaterState: UpdateState;
@@ -100,9 +105,9 @@ type LayoutNodesOptions = {
   onCreateBranch: (name: string) => Promise<void>;
   centerMode: "chat" | "diff";
   onExitDiff: () => void;
-  activeTab: "projects" | "codex" | "git" | "log";
-  onSelectTab: (tab: "projects" | "codex" | "git" | "log") => void;
-  tabletNavTab: "codex" | "git" | "log";
+  activeTab: "projects" | "claude" | "git" | "log";
+  onSelectTab: (tab: "projects" | "claude" | "git" | "log") => void;
+  tabletNavTab: "claude" | "git" | "log";
   gitPanelMode: "diff" | "log" | "issues";
   onGitPanelModeChange: (mode: "diff" | "log" | "issues") => void;
   gitStatus: {
@@ -206,11 +211,14 @@ export function useLayoutNodes(options: LayoutNodesOptions): LayoutNodesResult {
     <Sidebar
       workspaces={options.workspaces}
       threadsByWorkspace={options.threadsByWorkspace}
+      archivedThreadsByWorkspace={options.archivedThreadsByWorkspace}
       threadStatusById={options.threadStatusById}
       threadListLoadingByWorkspace={options.threadListLoadingByWorkspace}
       activeWorkspaceId={options.activeWorkspaceId}
       activeThreadId={options.activeThreadId}
       accountRateLimits={options.activeRateLimits}
+      showArchivedSessions={options.showArchivedSessions}
+      onToggleShowArchived={options.onToggleShowArchived}
       onOpenSettings={options.onOpenSettings}
       onOpenDebug={options.onOpenDebug}
       hasDebugAlerts={options.hasDebugAlerts}
@@ -220,9 +228,11 @@ export function useLayoutNodes(options: LayoutNodesOptions): LayoutNodesResult {
       onConnectWorkspace={options.onConnectWorkspace}
       onAddAgent={options.onAddAgent}
       onAddWorktreeAgent={options.onAddWorktreeAgent}
+      onImportSessions={options.onImportSessions}
       onToggleWorkspaceCollapse={options.onToggleWorkspaceCollapse}
       onSelectThread={options.onSelectThread}
       onDeleteThread={options.onDeleteThread}
+      onUnarchiveThread={options.onUnarchiveThread}
       onDeleteWorkspace={options.onDeleteWorkspace}
       onDeleteWorktree={options.onDeleteWorktree}
     />

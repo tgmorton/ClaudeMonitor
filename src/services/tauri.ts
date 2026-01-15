@@ -2,7 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AppSettings,
+  ClaudeDoctorResult,
   CodexDoctorResult,
+  SessionEntry,
+  ConversationItem,
   WorkspaceInfo,
   WorkspaceSettings,
 } from "../types";
@@ -233,4 +236,231 @@ export async function resumeThread(workspaceId: string, threadId: string) {
 
 export async function archiveThread(workspaceId: string, threadId: string) {
   return invoke<any>("archive_thread", { workspaceId, threadId });
+}
+
+// ============================================================================
+// Claude Agent SDK Service Functions
+// Commands match src-tauri/src/claude.rs
+// ============================================================================
+
+/**
+ * Start a new Claude session for a workspace.
+ * Tauri command: claude_start_session
+ */
+export async function claudeStartSession(
+  workspaceId: string,
+  cwd: string,
+  options?: { model?: string; permissionMode?: string },
+) {
+  return invoke<{ result?: { sessionId: string } }>("claude_start_session", {
+    workspaceId,
+    cwd,
+    model: options?.model ?? null,
+    permissionMode: options?.permissionMode ?? null,
+  });
+}
+
+/**
+ * Resume an existing Claude session.
+ * Tauri command: claude_resume_session
+ */
+export async function claudeResumeSession(
+  workspaceId: string,
+  sessionId: string,
+) {
+  return invoke<unknown>("claude_resume_session", {
+    workspaceId,
+    sessionId,
+  });
+}
+
+/**
+ * Send a message to a Claude session.
+ * Tauri command: claude_send_message
+ */
+export async function claudeSendMessage(
+  sessionId: string,
+  workspaceId: string,
+  message: string,
+  images?: string[],
+  messageId?: string,
+) {
+  return invoke("claude_send_message", {
+    sessionId,
+    workspaceId,
+    message,
+    images: images ?? null,
+    messageId: messageId ?? null,
+  });
+}
+
+/**
+ * Interrupt an active Claude session.
+ * Tauri command: claude_interrupt
+ */
+export async function claudeInterrupt(sessionId: string) {
+  return invoke("claude_interrupt", { sessionId });
+}
+
+/**
+ * Respond to a Claude permission request.
+ * Tauri command: claude_respond_permission
+ */
+export async function claudeRespondPermission(
+  sessionId: string,
+  toolUseId: string,
+  decision: "allow" | "deny",
+  message?: string,
+) {
+  return invoke("claude_respond_permission", {
+    sessionId,
+    toolUseId,
+    decision,
+    message: message ?? null,
+  });
+}
+
+/**
+ * Close a Claude session.
+ * Tauri command: claude_close_session
+ */
+export async function claudeCloseSession(sessionId: string) {
+  return invoke("claude_close_session", { sessionId });
+}
+
+/**
+ * Rewind a Claude session to a specific message, restoring file checkpoints.
+ * Tauri command: claude_rewind_files
+ * Note: Requires file checkpointing to be enabled in the bridge.
+ */
+export async function claudeRewindToMessage(
+  sessionId: string,
+  messageId: string,
+): Promise<{
+  canRewind: boolean;
+  error?: string;
+  filesChanged?: string[];
+  insertions?: number;
+  deletions?: number;
+}> {
+  return invoke("claude_rewind_files", { sessionId, userMessageId: messageId });
+}
+
+/**
+ * List available Claude models.
+ * Tauri command: claude_list_models
+ */
+export async function claudeListModels(sessionId?: string) {
+  return invoke<{ result?: { models: unknown[] } }>("claude_list_models", {
+    sessionId: sessionId ?? null,
+  });
+}
+
+/**
+ * Run Claude Code doctor to validate the installation.
+ * Tauri command: claude_doctor
+ */
+export async function runClaudeDoctor(
+  claudeCodeBin: string | null,
+): Promise<ClaudeDoctorResult> {
+  return invoke<ClaudeDoctorResult>("claude_doctor", {
+    claudeCodeBin,
+  });
+}
+
+// Legacy aliases for compatibility during transition
+export const createSession = claudeStartSession;
+export const resumeSession = claudeResumeSession;
+export const sendMessage = claudeSendMessage;
+export const interruptSession = claudeInterrupt;
+export const respondToPermission = claudeRespondPermission;
+
+// ============================================================================
+// Registry Service Functions (Agent C)
+// ============================================================================
+
+/**
+ * Get visible sessions for a workspace from the registry.
+ */
+export async function getVisibleSessions(
+  workspaceId: string,
+): Promise<SessionEntry[]> {
+  return invoke<SessionEntry[]>("get_visible_sessions", { workspaceId });
+}
+
+/**
+ * Scan for available sessions to import from Claude projects.
+ */
+export async function scanAvailableSessions(
+  workspaceId: string,
+): Promise<SessionEntry[]> {
+  return invoke<SessionEntry[]>("scan_available_sessions", { workspaceId });
+}
+
+/**
+ * Import sessions into the visibility list.
+ */
+export async function importSessions(
+  workspaceId: string,
+  sessionIds: string[],
+  sessionsData: SessionEntry[],
+): Promise<void> {
+  return invoke("import_sessions", { workspaceId, sessionIds, sessionsData });
+}
+
+/**
+ * Archive a session (remove from visibility, keep on disk).
+ */
+export async function registryArchiveSession(
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  return invoke("registry_archive_session", { workspaceId, sessionId });
+}
+
+/**
+ * Register a new session (called when bridge creates one).
+ */
+export async function registerSession(
+  workspaceId: string,
+  session: SessionEntry,
+): Promise<void> {
+  return invoke("register_session", { workspaceId, session });
+}
+
+/**
+ * Update session activity timestamp and preview.
+ */
+export async function updateSessionActivity(
+  sessionId: string,
+  preview?: string,
+): Promise<void> {
+  return invoke("update_session_activity", { sessionId, preview: preview ?? null });
+}
+
+export async function getSessionHistory(sessionId: string): Promise<{
+  items: ConversationItem[];
+  preview: string | null;
+  lastActivity: number;
+}> {
+  return invoke("get_session_history", { sessionId });
+}
+
+/**
+ * Get archived (hidden) sessions for a workspace.
+ */
+export async function getArchivedSessions(
+  workspaceId: string,
+): Promise<SessionEntry[]> {
+  return invoke<SessionEntry[]>("get_archived_sessions", { workspaceId });
+}
+
+/**
+ * Unarchive a session (add back to visibility list).
+ */
+export async function registryUnarchiveSession(
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  return invoke("registry_unarchive_session", { workspaceId, sessionId });
 }

@@ -131,6 +131,34 @@
   background: var(--surface-bubble-user);
 }
 
+.message-rewind {
+  opacity: 0;
+  transition: opacity 0.15s;
+  padding: 4px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin-left: 8px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.message:hover .message-rewind {
+  opacity: 1;
+}
+
+.message-rewind:hover {
+  background: var(--surface-card);
+  color: var(--text-strong);
+}
+
+.message-rewind:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .item-card {
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
@@ -318,6 +346,13 @@
 
 .tool-inline-dot.failed {
   background: var(--status-error);
+}
+
+.tool-inline-elapsed {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 2px;
 }
 
 .tool-inline-label {

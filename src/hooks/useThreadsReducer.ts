@@ -1,11 +1,32 @@
 import type {
   ApprovalRequest,
+  ClaudeApprovalRequest,
   ConversationItem,
   RateLimitSnapshot,
   ThreadSummary,
   ThreadTokenUsage,
   TurnPlan,
 } from "../types";
+
+// Unified approval type that supports both Codex and Claude requests
+export type UnifiedApprovalRequest = ApprovalRequest | ClaudeApprovalRequest;
+
+// Type guard to check if it's a Claude approval request
+export function isClaudeApproval(
+  approval: UnifiedApprovalRequest,
+): approval is ClaudeApprovalRequest {
+  return "tool_use_id" in approval && "session_id" in approval;
+}
+
+// Get a unique ID for an approval request (works for both types)
+// For Claude: uses tool_use_id (the identifier used by the backend)
+// For Codex: uses request_id
+export function getApprovalId(approval: UnifiedApprovalRequest): string | number {
+  if (isClaudeApproval(approval)) {
+    return approval.tool_use_id;
+  }
+  return approval.request_id;
+}
 import { normalizeItem, prepareThreadItems, upsertItem } from "../utils/threadItems";
 
 type ThreadActivityStatus = {
@@ -23,7 +44,7 @@ export type ThreadState = {
   threadStatusById: Record<string, ThreadActivityStatus>;
   threadListLoadingByWorkspace: Record<string, boolean>;
   activeTurnIdByThread: Record<string, string | null>;
-  approvals: ApprovalRequest[];
+  approvals: UnifiedApprovalRequest[];
   tokenUsageByThread: Record<string, ThreadTokenUsage>;
   rateLimitsByWorkspace: Record<string, RateLimitSnapshot | null>;
   planByThread: Record<string, TurnPlan | null>;
@@ -48,11 +69,14 @@ export type ThreadAction =
       threadId: string;
       text: string;
       images?: string[];
+      messageId?: string;
     }
   | { type: "addAssistantMessage"; threadId: string; text: string }
   | { type: "setThreadName"; workspaceId: string; threadId: string; name: string }
   | { type: "appendAgentDelta"; threadId: string; itemId: string; delta: string }
   | { type: "completeAgentMessage"; threadId: string; itemId: string; text: string }
+  | { type: "completeRunningTools"; threadId: string }
+  | { type: "migrateThread"; workspaceId: string; fromThreadId: string; toThreadId: string }
   | { type: "upsertItem"; threadId: string; item: ConversationItem }
   | { type: "setThreadItems"; threadId: string; items: ConversationItem[] }
   | {
@@ -69,8 +93,8 @@ export type ThreadAction =
       workspaceId: string;
       isLoading: boolean;
     }
-  | { type: "addApproval"; approval: ApprovalRequest }
-  | { type: "removeApproval"; requestId: number }
+  | { type: "addApproval"; approval: UnifiedApprovalRequest }
+  | { type: "removeApproval"; requestId: number | string }
   | { type: "setThreadTokenUsage"; threadId: string; tokenUsage: ThreadTokenUsage }
   | {
       type: "setRateLimits";
@@ -85,7 +109,8 @@ export type ThreadAction =
       threadId: string;
       text: string;
       timestamp: number;
-    };
+    }
+  | { type: "truncateItems"; threadId: string; afterIndex: number };
 
 const emptyItems: Record<string, ConversationItem[]> = {};
 
@@ -308,7 +333,7 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
           : textValue
         : imageLabel;
       const message: ConversationItem = {
-        id: `${Date.now()}-user`,
+        id: action.messageId ?? `${Date.now()}-user`,
         kind: "message",
         role: "user",
         text: combinedText || "[message]",
@@ -409,6 +434,95 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
           ...state.itemsByThread,
           [action.threadId]: prepareThreadItems(list),
         },
+      };
+    }
+    case "completeRunningTools": {
+      const list = state.itemsByThread[action.threadId] ?? [];
+      const next = list.map((item) => {
+        if (item.kind !== "tool" || item.status !== "running") {
+          return item;
+        }
+        return {
+          ...item,
+          status: "completed",
+        };
+      });
+      return {
+        ...state,
+        itemsByThread: {
+          ...state.itemsByThread,
+          [action.threadId]: prepareThreadItems(next),
+        },
+      };
+    }
+    case "migrateThread": {
+      if (action.fromThreadId === action.toThreadId) {
+        return state;
+      }
+      const items = state.itemsByThread[action.fromThreadId] ?? [];
+      const threads = state.threadsByWorkspace[action.workspaceId] ?? [];
+      const updatedThreads = threads.map((thread) =>
+        thread.id === action.fromThreadId ? { ...thread, id: action.toThreadId } : thread,
+      );
+      const nextItemsByThread = { ...state.itemsByThread };
+      delete nextItemsByThread[action.fromThreadId];
+      nextItemsByThread[action.toThreadId] = items;
+
+      const nextThreadStatusById = { ...state.threadStatusById };
+      if (state.threadStatusById[action.fromThreadId]) {
+        nextThreadStatusById[action.toThreadId] =
+          state.threadStatusById[action.fromThreadId];
+        delete nextThreadStatusById[action.fromThreadId];
+      }
+
+      const nextActiveTurnIdByThread = { ...state.activeTurnIdByThread };
+      if (state.activeTurnIdByThread[action.fromThreadId]) {
+        nextActiveTurnIdByThread[action.toThreadId] =
+          state.activeTurnIdByThread[action.fromThreadId];
+        delete nextActiveTurnIdByThread[action.fromThreadId];
+      }
+
+      const nextTokenUsageByThread = { ...state.tokenUsageByThread };
+      if (state.tokenUsageByThread[action.fromThreadId]) {
+        nextTokenUsageByThread[action.toThreadId] =
+          state.tokenUsageByThread[action.fromThreadId];
+        delete nextTokenUsageByThread[action.fromThreadId];
+      }
+
+      const nextPlanByThread = { ...state.planByThread };
+      if (state.planByThread[action.fromThreadId]) {
+        nextPlanByThread[action.toThreadId] = state.planByThread[action.fromThreadId];
+        delete nextPlanByThread[action.fromThreadId];
+      }
+
+      const nextLastAgentMessage = { ...state.lastAgentMessageByThread };
+      if (state.lastAgentMessageByThread[action.fromThreadId]) {
+        nextLastAgentMessage[action.toThreadId] =
+          state.lastAgentMessageByThread[action.fromThreadId];
+        delete nextLastAgentMessage[action.fromThreadId];
+      }
+
+      const nextActiveByWorkspace = {
+        ...state.activeThreadIdByWorkspace,
+        [action.workspaceId]:
+          state.activeThreadIdByWorkspace[action.workspaceId] === action.fromThreadId
+            ? action.toThreadId
+            : state.activeThreadIdByWorkspace[action.workspaceId],
+      };
+
+      return {
+        ...state,
+        itemsByThread: nextItemsByThread,
+        threadsByWorkspace: {
+          ...state.threadsByWorkspace,
+          [action.workspaceId]: updatedThreads,
+        },
+        threadStatusById: nextThreadStatusById,
+        activeTurnIdByThread: nextActiveTurnIdByThread,
+        tokenUsageByThread: nextTokenUsageByThread,
+        planByThread: nextPlanByThread,
+        lastAgentMessageByThread: nextLastAgentMessage,
+        activeThreadIdByWorkspace: nextActiveByWorkspace,
       };
     }
     case "upsertItem": {
@@ -532,7 +646,7 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
       return {
         ...state,
         approvals: state.approvals.filter(
-          (item) => item.request_id !== action.requestId,
+          (item) => getApprovalId(item) !== action.requestId,
         ),
       };
     case "setThreads": {
@@ -584,6 +698,18 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
           [action.threadId]: null,
         },
       };
+    case "truncateItems": {
+      const list = state.itemsByThread[action.threadId] ?? [];
+      // Keep items up to and including the target index
+      const truncated = list.slice(0, action.afterIndex + 1);
+      return {
+        ...state,
+        itemsByThread: {
+          ...state.itemsByThread,
+          [action.threadId]: truncated,
+        },
+      };
+    }
     default:
       return state;
   }

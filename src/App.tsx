@@ -20,7 +20,9 @@ import "./styles/settings.css";
 import "./styles/compact-base.css";
 import "./styles/compact-phone.css";
 import "./styles/compact-tablet.css";
+import "./styles/import-sessions.css";
 import { WorktreePrompt } from "./components/WorktreePrompt";
+import { ImportSessionsModal } from "./components/ImportSessionsModal";
 import { AboutView } from "./components/AboutView";
 import { SettingsView } from "./components/SettingsView";
 import { DesktopLayout } from "./components/layouts/DesktopLayout";
@@ -29,6 +31,7 @@ import { PhoneLayout } from "./components/layouts/PhoneLayout";
 import { useLayoutNodes } from "./hooks/useLayoutNodes";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useThreads } from "./hooks/useThreads";
+import { useRegistry } from "./hooks/useRegistry";
 import { useWindowDrag } from "./hooks/useWindowDrag";
 import { useGitStatus } from "./hooks/useGitStatus";
 import { useGitDiffs } from "./hooks/useGitDiffs";
@@ -106,9 +109,9 @@ function MainApp() {
   );
   const [accessMode, setAccessMode] = useState<AccessMode>("current");
   const [activeTab, setActiveTab] = useState<
-    "projects" | "codex" | "git" | "log"
-  >("codex");
-  const tabletTab = activeTab === "projects" ? "codex" : activeTab;
+    "projects" | "claude" | "git" | "log"
+  >("claude");
+  const tabletTab = activeTab === "projects" ? "claude" : activeTab;
   const [composerDraftsByThread, setComposerDraftsByThread] = useState<
     Record<string, string>
   >({});
@@ -243,7 +246,7 @@ function MainApp() {
     interruptTurn,
     removeThread,
     startThreadForWorkspace,
-    listThreadsForWorkspace,
+    listClaudeSessions,
     sendUserMessage,
     startReview,
     handleApprovalDecision
@@ -254,6 +257,7 @@ function MainApp() {
     model: resolvedModel,
     effort: selectedEffort,
     accessMode,
+    permissionMode: appSettings.defaultPermissionMode,
     customPrompts: prompts,
     onMessageActivity: refreshGitStatus
   });
@@ -266,6 +270,33 @@ function MainApp() {
     setImagesForThread,
     removeImagesForThread,
   } = useComposerImages({ activeThreadId, activeWorkspaceId });
+  const {
+    archivedSessions,
+    showArchived: showArchivedSessions,
+    setShowArchived: setShowArchivedSessions,
+    unarchiveSession,
+  } = useRegistry(activeWorkspaceId);
+  const archivedThreadsByWorkspace = useMemo(() => {
+    if (!activeWorkspaceId || !archivedSessions.length) {
+      return {};
+    }
+    return {
+      [activeWorkspaceId]: archivedSessions.map((session) => ({
+        id: session.sessionId,
+        name: session.preview ?? session.sessionId.slice(0, 8),
+        status: session.status,
+      })),
+    };
+  }, [activeWorkspaceId, archivedSessions]);
+  const handleToggleShowArchived = useCallback(() => {
+    setShowArchivedSessions((prev) => !prev);
+  }, [setShowArchivedSessions]);
+  const handleUnarchiveThread = useCallback(
+    (_workspaceId: string, threadId: string) => {
+      void unarchiveSession(threadId);
+    },
+    [unarchiveSession],
+  );
   const { exitDiffView, selectWorkspace, selectHome } = useWorkspaceSelection({
     workspaces,
     isCompact,
@@ -285,7 +316,7 @@ function MainApp() {
     addWorktreeAgent,
     connectWorkspace,
     onSelectWorkspace: selectWorkspace,
-    onCompactActivate: isCompact ? () => setActiveTab("codex") : undefined,
+    onCompactActivate: isCompact ? () => setActiveTab("claude") : undefined,
     onError: (message) => {
       addDebugEntry({
         id: `${Date.now()}-client-add-worktree-error`,
@@ -374,20 +405,19 @@ function MainApp() {
     startReview,
     clearActiveImages,
   });
-  const activeDraft = activeThreadId
-    ? composerDraftsByThread[activeThreadId] ?? ""
-    : "";
+  const draftFallbackKey = activeWorkspaceId
+    ? `draft-${activeWorkspaceId}`
+    : "draft-none";
+  const activeDraftKey = activeThreadId ?? draftFallbackKey;
+  const activeDraft = composerDraftsByThread[activeDraftKey] ?? "";
   const handleDraftChange = useCallback(
     (next: string) => {
-      if (!activeThreadId) {
-        return;
-      }
       setComposerDraftsByThread((prev) => ({
         ...prev,
-        [activeThreadId]: next
+        [activeDraftKey]: next
       }));
     },
-    [activeThreadId]
+    [activeDraftKey]
   );
   const isWorktreeWorkspace = activeWorkspace?.kind === "worktree";
   const activeParentWorkspace = isWorktreeWorkspace
@@ -407,11 +437,32 @@ function MainApp() {
   }, [activeTab, activeWorkspace, isPhone]);
 
   useEffect(() => {
+    if (!activeThreadId || !activeWorkspaceId) {
+      return;
+    }
+    const fallbackKey = `draft-${activeWorkspaceId}`;
+    if (!composerDraftsByThread[fallbackKey]) {
+      return;
+    }
+    setComposerDraftsByThread((prev) => {
+      const threadDraft = prev[activeThreadId] ?? "";
+      if (threadDraft) {
+        return prev;
+      }
+      const { [fallbackKey]: fallbackDraft, ...rest } = prev;
+      return {
+        ...rest,
+        [activeThreadId]: fallbackDraft,
+      };
+    });
+  }, [activeThreadId, activeWorkspaceId, composerDraftsByThread]);
+
+  useEffect(() => {
     if (!isTablet) {
       return;
     }
     if (activeTab === "projects") {
-      setActiveTab("codex");
+      setActiveTab("claude");
     }
   }, [activeTab, isTablet]);
 
@@ -420,12 +471,12 @@ function MainApp() {
     workspaces,
     hasLoaded,
     connectWorkspace,
-    listThreadsForWorkspace
+    listThreadsForWorkspace: listClaudeSessions
   });
   useWorkspaceRefreshOnFocus({
     workspaces,
     refreshWorkspaces,
-    listThreadsForWorkspace
+    listThreadsForWorkspace: listClaudeSessions
   });
 
   useNewAgentShortcut({
@@ -443,7 +494,7 @@ function MainApp() {
       if (workspace) {
         setActiveThreadId(null, workspace.id);
         if (isCompact) {
-          setActiveTab("codex");
+          setActiveTab("claude");
         }
       }
     } catch (error) {
@@ -464,11 +515,21 @@ function MainApp() {
     exitDiffView();
     selectWorkspace(workspace.id);
     if (!workspace.connected) {
-      await connectWorkspace(workspace);
+      try {
+        await connectWorkspace(workspace);
+      } catch (error) {
+        addDebugEntry({
+          id: `${Date.now()}-client-workspace-connect-error`,
+          timestamp: Date.now(),
+          source: "error",
+          label: "workspace/connect error",
+          payload: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
-    await startThreadForWorkspace(workspace.id);
+    await startThreadForWorkspace(workspace.id, workspace.path);
     if (isCompact) {
-      setActiveTab("codex");
+      setActiveTab("claude");
     }
     // Focus the composer input after creating the agent
     setTimeout(() => composerInputRef.current?.focus(), 0);
@@ -479,6 +540,12 @@ function MainApp() {
   ) {
     exitDiffView();
     openWorktreePrompt(workspace);
+  }
+
+  const [importSessionsTarget, setImportSessionsTarget] = useState<WorkspaceInfo | null>(null);
+
+  function handleImportSessions(workspace: WorkspaceInfo) {
+    setImportSessionsTarget(workspace);
   }
 
   function handleSelectDiff(path: string) {
@@ -580,7 +647,7 @@ function MainApp() {
 
   const showComposer = !isCompact
     ? centerMode === "chat" || centerMode === "diff"
-    : (isTablet ? tabletTab : activeTab) === "codex";
+    : (isTablet ? tabletTab : activeTab) === "claude";
   const showGitDetail = Boolean(selectedDiffPath) && isPhone;
   const appClassName = `app ${isCompact ? "layout-compact" : "layout-desktop"}${
     isPhone ? " layout-phone" : ""
@@ -609,12 +676,15 @@ function MainApp() {
   } = useLayoutNodes({
     workspaces,
     threadsByWorkspace,
+    archivedThreadsByWorkspace,
     threadStatusById,
     threadListLoadingByWorkspace,
     activeWorkspaceId,
     activeThreadId,
     activeItems,
     activeRateLimits,
+    showArchivedSessions,
+    onToggleShowArchived: handleToggleShowArchived,
     approvals,
     handleApprovalDecision,
     onOpenSettings: handleOpenSettings,
@@ -629,11 +699,12 @@ function MainApp() {
     onConnectWorkspace: async (workspace) => {
       await connectWorkspace(workspace);
       if (isCompact) {
-        setActiveTab("codex");
+        setActiveTab("claude");
       }
     },
     onAddAgent: handleAddAgent,
     onAddWorktreeAgent: handleAddWorktreeAgent,
+    onImportSessions: handleImportSessions,
     onToggleWorkspaceCollapse: (workspaceId, collapsed) => {
       const target = workspaces.find((entry) => entry.id === workspaceId);
       if (!target) {
@@ -660,6 +731,7 @@ function MainApp() {
       });
       removeImagesForThread(threadId);
     },
+    onUnarchiveThread: handleUnarchiveThread,
     onDeleteWorkspace: (workspaceId) => {
       void removeWorkspace(workspaceId);
     },
@@ -676,7 +748,7 @@ function MainApp() {
       selectWorkspace(workspaceId);
       setActiveThreadId(threadId, workspaceId);
       if (isCompact) {
-        setActiveTab("codex");
+        setActiveTab("claude");
       }
     },
     activeWorkspace,
@@ -889,6 +961,16 @@ function MainApp() {
           }}
           scaleShortcutTitle={scaleShortcutTitle}
           scaleShortcutText={scaleShortcutText}
+        />
+      )}
+      {importSessionsTarget && (
+        <ImportSessionsModal
+          workspace={importSessionsTarget}
+          onClose={() => setImportSessionsTarget(null)}
+          onImported={() => {
+            // Refresh the thread list after import
+            void listClaudeSessions(importSessionsTarget);
+          }}
         />
       )}
     </div>

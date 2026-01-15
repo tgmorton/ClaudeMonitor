@@ -37,6 +37,9 @@ type ComposerProps = {
   insertText?: QueuedMessage | null;
   onInsertHandled?: (id: string) => void;
   textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
+  subAgents?: { id: string; name: string }[];
+  selectedSubAgentId?: string | null;
+  onSelectSubAgent?: (id: string) => void;
 };
 
 export function Composer({
@@ -71,6 +74,9 @@ export function Composer({
   insertText = null,
   onInsertHandled,
   textareaRef: externalTextareaRef,
+  subAgents,
+  selectedSubAgentId,
+  onSelectSubAgent,
 }: ComposerProps) {
   const [text, setText] = useState(draftText);
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -189,6 +195,9 @@ export function Composer({
         accessMode={accessMode}
         onSelectAccessMode={onSelectAccessMode}
         contextUsage={contextUsage}
+        subAgents={subAgents}
+        selectedSubAgentId={selectedSubAgentId}
+        onSelectSubAgent={onSelectSubAgent}
       />
     </footer>
   );

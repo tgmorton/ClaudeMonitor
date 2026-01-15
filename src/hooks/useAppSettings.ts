@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AppSettings } from "../types";
-import { getAppSettings, runCodexDoctor, updateAppSettings } from "../services/tauri";
+import {
+  getAppSettings,
+  runCodexDoctor,
+  runClaudeDoctor,
+  updateAppSettings,
+} from "../services/tauri";
 import { clampUiScale, UI_SCALE_DEFAULT } from "../utils/uiScale";
 
 const defaultSettings: AppSettings = {
   codexBin: null,
+  claudeCodeBin: null,
   defaultAccessMode: "current",
+  defaultPermissionMode: "default",
   uiScale: UI_SCALE_DEFAULT,
 };
 
@@ -60,11 +67,16 @@ export function useAppSettings() {
     return runCodexDoctor(codexBin);
   }, []);
 
+  const claudeDoctor = useCallback(async (claudeCodeBin: string | null) => {
+    return runClaudeDoctor(claudeCodeBin);
+  }, []);
+
   return {
     settings,
     setSettings,
     saveSettings,
     doctor,
+    claudeDoctor,
     isLoading,
   };
 }

@@ -653,3 +653,52 @@
 .app.reduced-transparency .sidebar {
   backdrop-filter: none;
 }
+
+/* Archived sessions toggle and list */
+.thread-show-archived {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  cursor: pointer;
+  opacity: 0.7;
+  margin-top: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.thread-show-archived:hover {
+  opacity: 1;
+}
+
+.thread-list-archived {
+  margin-top: 4px;
+  border-top: 1px dashed var(--border-subtle);
+  padding-top: 4px;
+}
+
+.thread-row-archived {
+  opacity: 0.5;
+}
+
+.thread-row-archived:hover {
+  opacity: 0.8;
+}
+
+.thread-status.archived {
+  background: var(--text-tertiary);
+  box-shadow: none;
+}
+
+.thread-row-missing {
+  opacity: 0.5;
+}
+
+.thread-row-missing:hover {
+  opacity: 0.7;
+}
+
+.thread-status.missing {
+  background: var(--text-error, #ff6b6b);
+  box-shadow: none;
+}

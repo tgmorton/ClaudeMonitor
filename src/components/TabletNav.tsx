@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { GitBranch, MessagesSquare, TerminalSquare } from "lucide-react";
 
-type TabletNavTab = "codex" | "git" | "log";
+type TabletNavTab = "claude" | "git" | "log";
 
 type TabletNavProps = {
   activeTab: TabletNavTab;
@@ -9,7 +9,7 @@ type TabletNavProps = {
 };
 
 const tabs: { id: TabletNavTab; label: string; icon: ReactNode }[] = [
-  { id: "codex", label: "Codex", icon: <MessagesSquare className="tablet-nav-icon" /> },
+  { id: "claude", label: "Claude", icon: <MessagesSquare className="tablet-nav-icon" /> },
   { id: "git", label: "Git", icon: <GitBranch className="tablet-nav-icon" /> },
   { id: "log", label: "Log", icon: <TerminalSquare className="tablet-nav-icon" /> },
 ];

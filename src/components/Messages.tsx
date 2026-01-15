@@ -3,12 +3,15 @@ import type { ConversationItem } from "../types";
 import { Markdown } from "./Markdown";
 import { DiffBlock } from "./DiffBlock";
 import { languageFromPath } from "../utils/syntax";
+import { RotateCcw } from "lucide-react";
 
 type MessagesProps = {
   items: ConversationItem[];
   isThinking: boolean;
   processingStartedAt?: number | null;
   lastDurationMs?: number | null;
+  onRewindToMessage?: (itemId: string, itemIndex: number) => void;
+  isRewinding?: boolean;
 };
 
 type ToolSummary = {
@@ -27,6 +30,18 @@ function basename(path: string) {
   const normalized = path.replace(/\\/g, "/");
   const parts = normalized.split("/").filter(Boolean);
   return parts.length ? parts[parts.length - 1] : path;
+}
+
+function formatToolElapsed(seconds: number | undefined): string | null {
+  if (seconds === undefined || seconds < 0) {
+    return null;
+  }
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  if (mins > 0) {
+    return `${mins}m ${secs}s`;
+  }
+  return `${secs}s`;
 }
 
 function parseToolArgs(detail: string) {
@@ -204,6 +219,8 @@ export const Messages = memo(function Messages({
   isThinking,
   processingStartedAt = null,
   lastDurationMs = null,
+  onRewindToMessage,
+  isRewinding = false,
 }: MessagesProps) {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
@@ -274,13 +291,24 @@ export const Messages = memo(function Messages({
     <div
       className="messages messages-full"
     >
-      {visibleItems.map((item) => {
+      {visibleItems.map((item, index) => {
         if (item.kind === "message") {
           return (
             <div key={item.id} className={`message ${item.role}`}>
               <div className="bubble">
                 <Markdown value={item.text} className="markdown" />
               </div>
+              {onRewindToMessage && item.role === "user" && (
+                <button
+                  type="button"
+                  className="message-rewind"
+                  onClick={() => onRewindToMessage(item.id, index)}
+                  disabled={isRewinding}
+                  title="Rewind to this point"
+                >
+                  <RotateCcw size={12} />
+                </button>
+              )}
             </div>
           );
         }
@@ -428,6 +456,11 @@ export const Messages = memo(function Messages({
                   aria-expanded={expandedItems.has(item.id)}
                 >
                   <span className={`tool-inline-dot ${tone}`} aria-hidden />
+                  {tone === "processing" && item.elapsedSeconds !== undefined && (
+                    <span className="tool-inline-elapsed">
+                      {formatToolElapsed(item.elapsedSeconds)}
+                    </span>
+                  )}
                   {summaryLabel && (
                     <span className="tool-inline-label">{summaryLabel}:</span>
                   )}
